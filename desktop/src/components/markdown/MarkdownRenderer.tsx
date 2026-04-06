@@ -1,54 +1,25 @@
-import { useMemo } from 'react'
+import { useMemo, useCallback } from 'react'
 import { marked, type Tokens } from 'marked'
-import { escapeHtml, highlightCodeLines, isHighlightable } from '../chat/highlightCode'
+import { CodeViewer } from '../chat/CodeViewer'
 
 type Props = {
   content: string
 }
 
+type CodeBlock = {
+  id: string
+  code: string
+  language: string | undefined
+}
+
 const renderer = new marked.Renderer()
 
+let pendingCodeBlocks: CodeBlock[] = []
+
 renderer.code = function ({ text, lang }: Tokens.Code) {
-  const languageLabel = escapeHtml(lang || 'code')
-  const lines = text.split('\n')
-  const hasLanguage = isHighlightable(lang)
-  const highlightedLines = highlightCodeLines(text, lang)
-
-  // Show line numbers only when language is known (actual code).
-  // Plain text, file trees, command output etc. look better without them.
-  const body = hasLanguage
-    ? highlightedLines
-        .map((line, index) => `
-          <div class="grid grid-cols-[3rem,minmax(0,1fr)] gap-0 hover:bg-[#f6f8fa]/50">
-            <span class="select-none border-r border-[#eaeef2] bg-[#fafbfc] px-2 py-px text-right text-[11px] text-[#8b949e]">${index + 1}</span>
-            <span class="overflow-hidden bg-white px-3 py-px whitespace-pre-wrap break-words text-[#24292f]">${line || '&nbsp;'}</span>
-          </div>
-        `)
-        .join('')
-    : highlightedLines
-        .map((line) => `
-          <div class="hover:bg-[#f6f8fa]/50">
-            <span class="block bg-white px-3 py-px whitespace-pre-wrap break-words text-[#24292f]">${line || '&nbsp;'}</span>
-          </div>
-        `)
-        .join('')
-
-  return `
-    <div class="my-4 overflow-hidden rounded-lg border border-[#d0d7de] bg-[#f6f8fa] text-[#24292f]">
-      <div class="flex items-center justify-between border-b border-[#d0d7de] bg-white px-3 py-1.5 text-[11px] text-[#57606a]">
-        <div class="flex items-center gap-3">
-          <span class="font-semibold uppercase tracking-[0.14em] text-[#57606a]">${languageLabel}</span>
-          <span>${lines.length} ${lines.length === 1 ? 'line' : 'lines'}</span>
-        </div>
-        <button class="rounded-md border border-[#d0d7de] bg-white px-2 py-0.5 text-[11px] text-[#57606a] transition-colors hover:bg-[#f3f4f6] hover:text-[#24292f]" data-copy-code="${escapeHtml(text)}">
-          Copy
-        </button>
-      </div>
-      <div class="max-h-[420px] overflow-auto">
-        <div class="min-w-full font-[var(--font-mono)] text-[12px] leading-[1.3]">${body}</div>
-      </div>
-    </div>
-  `
+  const id = `cb-${pendingCodeBlocks.length}`
+  pendingCodeBlocks.push({ id, code: text, language: lang || undefined })
+  return `<div data-codeblock-id="${id}"></div>`
 }
 
 marked.setOptions({
@@ -57,16 +28,46 @@ marked.setOptions({
 })
 marked.use({ renderer })
 
-export function MarkdownRenderer({ content }: Props) {
-  const html = useMemo(() => {
-    try {
-      return marked.parse(content) as string
-    } catch {
-      return content
-    }
-  }, [content])
+function parseMarkdown(content: string): { html: string; codeBlocks: CodeBlock[] } {
+  pendingCodeBlocks = []
+  const html = marked.parse(content) as string
+  const codeBlocks = [...pendingCodeBlocks]
+  pendingCodeBlocks = []
+  return { html, codeBlocks }
+}
 
-  const handleClick = async (event: React.MouseEvent<HTMLDivElement>) => {
+export function MarkdownRenderer({ content }: Props) {
+  const { html, codeBlocks } = useMemo(() => parseMarkdown(content), [content])
+
+  const parts = useMemo(() => {
+    if (codeBlocks.length === 0) {
+      return [{ type: 'html' as const, content: html }]
+    }
+
+    const result: Array<{ type: 'html'; content: string } | { type: 'code'; block: CodeBlock }> = []
+    let remaining = html
+
+    for (const block of codeBlocks) {
+      const marker = `<div data-codeblock-id="${block.id}"></div>`
+      const idx = remaining.indexOf(marker)
+      if (idx === -1) continue
+
+      const before = remaining.slice(0, idx)
+      if (before) {
+        result.push({ type: 'html', content: before })
+      }
+      result.push({ type: 'code', block })
+      remaining = remaining.slice(idx + marker.length)
+    }
+
+    if (remaining) {
+      result.push({ type: 'html', content: remaining })
+    }
+
+    return result
+  }, [html, codeBlocks])
+
+  const handleClick = useCallback(async (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null
     const button = target?.closest<HTMLButtonElement>('[data-copy-code]')
     if (!button) return
@@ -82,26 +83,47 @@ export function MarkdownRenderer({ content }: Props) {
         button.textContent = original
       }, 1500)
     } catch {
-      // Ignore clipboard errors and keep the original label.
+      // Ignore clipboard errors
     }
+  }, [])
+
+  const proseClasses = `prose prose-sm max-w-none text-[var(--color-text-primary)]
+    prose-headings:text-[var(--color-text-primary)] prose-headings:font-semibold
+    prose-p:my-2 prose-p:leading-relaxed
+    prose-code:text-[13px] prose-code:font-[var(--font-mono)] prose-code:bg-[var(--color-surface-info)] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded
+    prose-pre:!bg-transparent prose-pre:!p-0 prose-pre:!shadow-none
+    prose-a:text-[var(--color-text-accent)] prose-a:no-underline hover:prose-a:underline
+    prose-strong:text-[var(--color-text-primary)]
+    prose-ul:my-2 prose-ol:my-2
+    prose-li:my-0.5
+    prose-table:text-sm
+    prose-th:bg-[var(--color-surface-info)] prose-th:px-3 prose-th:py-2
+    prose-td:px-3 prose-td:py-2 prose-td:border-[var(--color-border)]`
+
+  if (codeBlocks.length === 0) {
+    return (
+      <div
+        className={proseClasses}
+        dangerouslySetInnerHTML={{ __html: html }}
+        onClick={handleClick}
+      />
+    )
   }
 
   return (
-    <div
-      className="prose prose-sm max-w-none text-[var(--color-text-primary)]
-        prose-headings:text-[var(--color-text-primary)] prose-headings:font-semibold
-        prose-p:my-2 prose-p:leading-relaxed
-        prose-code:text-[13px] prose-code:font-[var(--font-mono)] prose-code:bg-[var(--color-surface-info)] prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded
-        prose-pre:!bg-transparent prose-pre:!p-0 prose-pre:!shadow-none
-        prose-a:text-[var(--color-text-accent)] prose-a:no-underline hover:prose-a:underline
-        prose-strong:text-[var(--color-text-primary)]
-        prose-ul:my-2 prose-ol:my-2
-        prose-li:my-0.5
-        prose-table:text-sm
-        prose-th:bg-[var(--color-surface-info)] prose-th:px-3 prose-th:py-2
-        prose-td:px-3 prose-td:py-2 prose-td:border-[var(--color-border)]"
-      dangerouslySetInnerHTML={{ __html: html }}
-      onClick={handleClick}
-    />
+    <div className={proseClasses} onClick={handleClick}>
+      {parts.map((part, i) =>
+        part.type === 'html' ? (
+          <div key={i} dangerouslySetInnerHTML={{ __html: part.content }} />
+        ) : (
+          <div key={part.block.id} className="my-4">
+            <CodeViewer
+              code={part.block.code}
+              language={part.block.language}
+            />
+          </div>
+        )
+      )}
+    </div>
   )
 }
