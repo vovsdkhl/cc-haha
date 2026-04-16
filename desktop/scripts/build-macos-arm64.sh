@@ -187,8 +187,12 @@ build_canonical_dmg() {
     | grep -E '^/dev/' | head -1 | awk '{print $1}')
   mount_dir=$(hdiutil info | grep -E "${dev_name}" | tail -1 | awk '{$1=$2=""; print}' | xargs)
 
-  # Use AppleScript to set icon positions and window size
-  osascript <<APPLESCRIPT
+  # Finder AppleScript 在新版 macOS (Sequoia+) 上某些属性
+  # (toolbar/statusbar visible、某些 container window 属性) 不再支持,
+  # 会返回 -10006 错误。美化失败不是 blocker —— 即便 layout 没设上,
+  # DMG 本身还是可用的,只是用户打开时看到的是 Finder 默认排布。
+  # 所以这里允许 osascript 非零退出,只 warn,不让 set -e 炸掉整个脚本。
+  if ! osascript <<APPLESCRIPT
 tell application "Finder"
   tell disk "Claude Code Haha"
     open
@@ -209,9 +213,15 @@ tell application "Finder"
   end tell
 end tell
 APPLESCRIPT
+  then
+    echo "[build-macos-arm64] WARN: Finder layout AppleScript failed (likely macOS version incompatible); DMG will use default Finder layout" >&2
+  fi
 
   sync
-  hdiutil detach "${dev_name}" -quiet
+  # osascript 可能已经让 Finder 打开了 volume 窗口,正常 detach 可能因为
+  # "Resource busy" 失败。失败时用 -force 二次尝试。
+  hdiutil detach "${dev_name}" -quiet 2>/dev/null \
+    || hdiutil detach "${dev_name}" -force -quiet
 
   # Convert to compressed read-only DMG
   hdiutil convert "${rw_dmg}" -format UDZO -o "${dmg_output}" -ov >/dev/null
